@@ -19,6 +19,7 @@ from torch import tensor
 from tqdm import tqdm
 
 from config import cfg
+from yacs.config import CfgNode
 from losses.center_loss import CenterLoss
 from losses.triplet_loss import CrossEntropyLabelSmooth, TripletLoss
 from modelling.baseline import Baseline
@@ -60,30 +61,31 @@ class ModelBase(pl.LightningModule):
             if cfg.TEST.ONLY_TEST:
                 # To make sure that loaded hparams are overwritten by cfg we may have chnaged
                 hparams = {**kwargs, **cfg}
-        self.hparams = AttributeDict(hparams)
-        self.save_hyperparameters(self.hparams)
+        
+        self.hyperparameters = AttributeDict(hparams)
+        self.save_hyperparameters(self.hyperparameters)
 
         if test_dataloader is not None:
             self.test_dataloader = test_dataloader
 
         # Create backbone model
-        self.backbone = Baseline(self.hparams)
+        self.backbone = Baseline(self.hyperparameters)
 
         self.contrastive_loss = TripletLoss(
-            self.hparams.SOLVER.MARGIN, self.hparams.SOLVER.DISTANCE_FUNC
+            self.hyperparameters.SOLVER.MARGIN, self.hyperparameters.SOLVER.DISTANCE_FUNC
         )
 
-        d_model = self.hparams.MODEL.BACKBONE_EMB_SIZE
-        self.xent = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes)
+        d_model = self.hyperparameters.MODEL.BACKBONE_EMB_SIZE
+        self.xent = CrossEntropyLabelSmooth(num_classes=self.hyperparameters.num_classes)
         self.center_loss = CenterLoss(
-            num_classes=self.hparams.num_classes, feat_dim=d_model
+            num_classes=self.hyperparameters.num_classes, feat_dim=d_model
         )
-        self.center_loss_weight = self.hparams.SOLVER.CENTER_LOSS_WEIGHT
+        self.center_loss_weight = self.hyperparameters.SOLVER.CENTER_LOSS_WEIGHT
 
         self.bn = torch.nn.BatchNorm1d(d_model)
         self.bn.bias.requires_grad_(False)
 
-        self.fc_query = torch.nn.Linear(d_model, self.hparams.num_classes, bias=False)
+        self.fc_query = torch.nn.Linear(d_model, self.hyperparameters.num_classes, bias=False)
         self.fc_query.apply(weights_init_classifier)
 
         self.losses_names = ["query_xent", "query_triplet", "query_center"]
@@ -95,8 +97,8 @@ class ModelBase(pl.LightningModule):
         return torch.sum(vecs, dim) / length
 
     def configure_optimizers(self):
-        optimizers_list = build_optimizer(self.named_parameters(), self.hparams)
-        self.lr_scheduler = build_scheduler(optimizers_list[0], self.hparams)
+        optimizers_list = build_optimizer(self.named_parameters(), self.hyperparameters)
+        self.lr_scheduler = build_scheduler(optimizers_list[0], self.hyperparameters)
         return optimizers_list, self.lr_scheduler
 
     def optimizer_step(
@@ -112,13 +114,13 @@ class ModelBase(pl.LightningModule):
         **kwargs,
     ):
 
-        if self.hparams.SOLVER.USE_WARMUP_LR:
-            if epoch < self.hparams.SOLVER.WARMUP_EPOCHS:
+        if self.hyperparameters.SOLVER.USE_WARMUP_LR:
+            if epoch < self.hyperparameters.SOLVER.WARMUP_EPOCHS:
                 lr_scale = min(
-                    1.0, float(epoch + 1) / float(self.hparams.SOLVER.WARMUP_EPOCHS)
+                    1.0, float(epoch + 1) / float(self.hyperparameters.SOLVER.WARMUP_EPOCHS)
                 )
                 for pg in optimizer.param_groups:
-                    pg["lr"] = lr_scale * self.hparams.SOLVER.BASE_LR
+                    pg["lr"] = lr_scale * self.hyperparameters.SOLVER.BASE_LR
 
         super().optimizer_step(
             epoch=epoch,
@@ -142,10 +144,10 @@ class ModelBase(pl.LightningModule):
             self.trainer.train_dataloader.sampler.set_epoch(self.current_epoch + 1)
 
         lr = self.lr_scheduler.get_last_lr()[0]
-        loss = torch.stack([x.pop("loss") for x in outputs]).mean().cpu().detach()
-        epoch_dist_ap = np.mean([x["other"].pop("step_dist_ap") for x in outputs])
-        epoch_dist_an = np.mean([x["other"].pop("step_dist_an") for x in outputs])
-        l2_mean_norm = np.mean([x["other"].pop("l2_mean_centroid") for x in outputs])
+        loss = torch.stack([x["loss"] for x in outputs]).mean().cpu().detach()
+        epoch_dist_ap = np.mean([x["other"]["step_dist_ap"] for x in outputs])
+        epoch_dist_an = np.mean([x["other"]["step_dist_an"] for x in outputs])
+        l2_mean_norm = np.mean([x["other"]["l2_mean_centroid"] for x in outputs])
 
         del outputs
 
@@ -164,7 +166,7 @@ class ModelBase(pl.LightningModule):
                 self.losses_dict[name] = []  ## Zeroing values after a completed epoch
 
         self.trainer.logger.log_metrics(log_data, step=self.trainer.current_epoch)
-        self.trainer.accelerator_backend.barrier()
+        # self.trainer.accelerator_backend.barrier()
 
     @rank_zero_only
     def validation_step(self, batch, batch_idx):
@@ -180,7 +182,7 @@ class ModelBase(pl.LightningModule):
     def validation_create_centroids(
         self, embeddings, labels, camids, respect_camids=False
     ):
-        num_query = self.hparams.num_query
+        num_query = self.hyperparameters.num_query
         # Keep query data samples seperated
         embeddings_query = embeddings[:num_query].cpu()
         labels_query = labels[:num_query]
@@ -265,14 +267,14 @@ class ModelBase(pl.LightningModule):
     def get_val_metrics(self, embeddings, labels, camids):
         self.r1_map_func = R1_mAP(
             pl_module=self,
-            num_query=self.hparams.num_query,
-            feat_norm=self.hparams.TEST.FEAT_NORM,
+            num_query=self.hyperparameters.num_query,
+            feat_norm=self.hyperparameters.TEST.FEAT_NORM,
         )
         respect_camids = (
             True
             if (
-                self.hparams.MODEL.KEEP_CAMID_CENTROIDS
-                and self.hparams.MODEL.USE_CENTROIDS
+                self.hyperparameters.MODEL.KEEP_CAMID_CENTROIDS
+                and self.hyperparameters.MODEL.USE_CENTROIDS
             )
             else False
         )
@@ -304,18 +306,18 @@ class ModelBase(pl.LightningModule):
             )
             camids = torch.cat([x.pop("camid") for x in outputs]).cpu().detach().numpy()
             del outputs
-            if self.hparams.MODEL.USE_CENTROIDS:
+            if self.hyperparameters.MODEL.USE_CENTROIDS:
                 print("Evaluation is done using centroids")
                 embeddings, labels, camids = self.validation_create_centroids(
                     embeddings,
                     labels,
                     camids,
-                    respect_camids=self.hparams.MODEL.KEEP_CAMID_CENTROIDS,
+                    respect_camids=self.hyperparameters.MODEL.KEEP_CAMID_CENTROIDS,
                 )
             if self.trainer.global_rank == 0 and self.trainer.local_rank == 0:
                 self.get_val_metrics(embeddings, labels, camids)
             del embeddings, labels, camids
-        self.trainer.accelerator_backend.barrier()
+        # self.trainer.accelerator_backend.barrier()
 
     @rank_zero_only
     def eval_on_train(self):
@@ -339,7 +341,7 @@ class ModelBase(pl.LightningModule):
                 embeddings, labels, camids
             )
 
-            self.r1_map_func = R1_mAP(self.hparams.num_query)
+            self.r1_map_func = R1_mAP(self.hyperparameters.num_query)
             cmc, mAP, all_topk = self.r1_map_func.compute(
                 feats=embeddings, pids=labels, camids=camids
             )

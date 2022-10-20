@@ -151,7 +151,9 @@ class CTLModel(ModelBase):
             contrastive_loss_step + center_loss + xent_query + contrastive_loss_query
         )
 
-        self.manual_backward(total_loss, optimizer=opt)
+        # print(opt)
+        # self.manual_backward(total_loss, optimizer=opt)
+        self.manual_backward(total_loss)
         opt.step()
 
         for param in self.center_loss.parameters():
